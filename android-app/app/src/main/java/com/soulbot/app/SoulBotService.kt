@@ -1,6 +1,7 @@
 package com.soulbot.app
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -111,11 +112,13 @@ class SoulBotService : AccessibilityService() {
     private val restartHandler = Handler(Looper.getMainLooper())
     private var lastDiagnosticsAt = 0L
     private var lastDiagnosticsSignature = ""
+    private var lastStoppedListSignature = ""
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        RuntimeLog.record(applicationContext, "accessibility service connected")
+        val reportsViewIds = serviceInfo.flags and AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS != 0
+        RuntimeLog.record(applicationContext, "accessibility service connected; reportsViewIds=$reportsViewIds")
         if (Prefs.getTaskShouldRun(applicationContext)) {
             start()
         } else {
@@ -583,6 +586,7 @@ class SoulBotService : AccessibilityService() {
             capabilities.sortedBy(SoulUiCapability::ordinal).joinToString { it.key },
             visibleNodeCount / 10,
         ).joinToString("|")
+        verifyStoppedConversationList(page)
         if (signature == lastDiagnosticsSignature) return
         lastDiagnosticsSignature = signature
         DeviceCompatibilityStore.record(
@@ -595,6 +599,31 @@ class SoulBotService : AccessibilityService() {
                 visibleNodeCount = visibleNodeCount,
                 capabilities = capabilities,
             ),
+        )
+    }
+
+    private fun verifyStoppedConversationList(page: String) {
+        // Read-only verification of the real Android tree: no clicks or replies.
+        if (running || page != "聊天列表") {
+            lastStoppedListSignature = ""
+            return
+        }
+        val list = conversationListRows()
+        val queriedBadges = findByIds(ID_UNREAD_BADGE).count(::isVisibleOnScreen)
+        val badgeIds = list.nodes.values.mapNotNull {
+            runCatching { it.viewIdResourceName }.getOrNull()
+        }.filter { id ->
+            val name = id.substringAfter(":id/")
+            listOf("unread", "badge", "number", "count", "red_dot").any { name.contains(it, ignoreCase = true) }
+        }.groupingBy { it.substringAfter(":id/") }.eachCount()
+        val unreadRows = list.rows.count { it.unread }
+        val signature = listOf(list.resourceIdNodes, list.visibleNames, list.visibleBadges,
+            list.rows.size, unreadRows, queriedBadges, badgeIds).joinToString("|")
+        if (signature == lastStoppedListSignature) return
+        lastStoppedListSignature = signature
+        RuntimeLog.record(
+            applicationContext,
+            "read-only conversation list verification; resourceIdNodes=${list.resourceIdNodes}; visibleNames=${list.visibleNames}; visibleBadges=${list.visibleBadges}; visibleRows=${list.rows.size}; unreadRows=$unreadRows; queriedBadges=$queriedBadges; badgeIds=$badgeIds",
         )
     }
 
@@ -1277,20 +1306,24 @@ class SoulBotService : AccessibilityService() {
         val nodes: Map<Int, AccessibilityNodeInfo>,
         val visibleNames: Int,
         val visibleBadges: Int,
+        val resourceIdNodes: Int,
     )
 
     private fun conversationListRows(): ConversationListSnapshot {
-        val empty = ConversationListSnapshot(emptyList(), emptyMap(), 0, 0)
+        val empty = ConversationListSnapshot(emptyList(), emptyMap(), 0, 0, 0)
         if (!isOnList()) return empty
         val currentRoot = root() ?: return empty
         val pending = ArrayDeque<Pair<AccessibilityNodeInfo, Int?>>()
         pending.add(currentRoot to null)
         val nodes = mutableMapOf<Int, AccessibilityNodeInfo>()
         val metadata = mutableListOf<ConversationUiNode>()
+        var resourceIdNodes = 0
         while (pending.isNotEmpty() && metadata.size < 5000) {
             val (node, parentId) = pending.removeLast()
             val id = metadata.size
-            val role = when (runCatching { node.viewIdResourceName }.getOrNull()) {
+            val resourceId = runCatching { node.viewIdResourceName }.getOrNull()
+            if (!resourceId.isNullOrBlank()) resourceIdNodes++
+            val role = when (resourceId) {
                 ID_CONV_LIST -> ConversationNodeRole.LIST
                 ID_CONV_ITEM -> ConversationNodeRole.LEGACY_ROW
                 ID_CONV_NAME -> ConversationNodeRole.NAME
@@ -1327,6 +1360,7 @@ class SoulBotService : AccessibilityService() {
             nodes = nodes,
             visibleNames = metadata.count { it.visible && it.role == ConversationNodeRole.NAME },
             visibleBadges = metadata.count { it.visible && it.role == ConversationNodeRole.UNREAD },
+            resourceIdNodes = resourceIdNodes,
         )
     }
 
