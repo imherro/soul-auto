@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity() {
         tvRuntimeDetail.text = if (!serviceAvailable && accessibilityEnabled) {
             "无障碍设置已开启；若长时间未连接，请重新开启一次"
         } else if (!running && serviceAvailable &&
-            rawStatus !in setOf("未配置 API Key", "模型配置不完整")
+            rawStatus !in setOf("未配置 API Key", "模型配置不完整", FloatingStatusFormatter.STARTING)
         ) {
             "自动任务未运行，请在悬浮控制中点击启动"
         } else {

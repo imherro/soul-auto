@@ -4,6 +4,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class FloatingStatusFormatterTest {
+    @Test fun queuedStartIsShownAsStartingRatherThanStopped() {
+        assertEquals("正在启动", FloatingStatusFormatter.title(false, true, FloatingStatusFormatter.STARTING))
+        assertEquals("正在启动，请稍候", FloatingStatusFormatter.detail(false, true, FloatingStatusFormatter.STARTING, 0L, 0L))
+    }
+
+    @Test fun unavailableServiceStillTakesPriorityOverPendingStart() {
+        assertEquals("尚未就绪", FloatingStatusFormatter.title(false, false, FloatingStatusFormatter.STARTING))
+    }
     @Test
     fun running_countdown_names_the_next_action_and_rounds_up_seconds() {
         assertEquals(

@@ -104,6 +104,7 @@ class SoulBotService : AccessibilityService() {
 
     private val random = Random.Default
     private var worker: Thread? = null
+    private var startQueuedAfterStop = false
     private var historyDb: HistoryDatabase? = null
     private var learningDb: ChatLearningDatabase? = null
     private var conversationMemoryDb: ConversationMemoryDatabase? = null
@@ -135,18 +136,23 @@ class SoulBotService : AccessibilityService() {
         RuntimeLog.record(applicationContext, "accessibility service interrupted")
     }
 
+    @Synchronized
     override fun onDestroy() {
         RuntimeLog.record(applicationContext, "accessibility service destroyed; shouldRun=${Prefs.getTaskShouldRun(applicationContext)}")
         restartHandler.removeCallbacksAndMessages(null)
-        running = false
+        startQueuedAfterStop = false
+        if (instance === this) {
+            running = false
+            instance = null
+        }
         worker?.interrupt()
-        instance = null
         super.onDestroy()
     }
 
+    @Synchronized
     fun start() {
         Prefs.setTaskShouldRun(applicationContext, true)
-        if (running || worker?.isAlive == true) {
+        if (running) {
             RuntimeLog.record(
                 applicationContext,
                 "task start ignored; running=$running; workerAlive=${worker?.isAlive == true}",
@@ -154,17 +160,28 @@ class SoulBotService : AccessibilityService() {
             return
         }
         restartHandler.removeCallbacksAndMessages(null)
+        if (worker?.isAlive == true) {
+            startQueuedAfterStop = true
+            statusText = FloatingStatusFormatter.STARTING
+            statusDeadline = 0
+            RuntimeLog.record(applicationContext, "task start queued; previous worker stopping")
+            return
+        }
+        startQueuedAfterStop = false
         running = true
         RuntimeLog.record(applicationContext, "task start requested; launching worker")
         worker = Thread { runLoop() }.apply { start() }
     }
 
+    @Synchronized
     fun stop() {
         RuntimeLog.record(
             applicationContext,
             "task stop requested by user; running=$running; workerAlive=${worker?.isAlive == true}",
         )
         Prefs.setTaskShouldRun(applicationContext, false)
+        startQueuedAfterStop = false
+        restartHandler.removeCallbacksAndMessages(null)
         Prefs.setLastStopReason(applicationContext, "用户手动停止")
         running = false
         statusText = "用户手动停止"
@@ -2596,21 +2613,34 @@ class SoulBotService : AccessibilityService() {
             learningDb = null
             runCatching { historyDb?.close() }
             historyDb = null
-            // A destroyed service can overlap briefly with a newly connected one.
-            // The old worker must never overwrite the new instance's global state.
-            val ownsGlobalState = instance === this
-            if (ownsGlobalState) {
-                running = false
-                statusDeadline = 0
-            }
-            if (worker === Thread.currentThread()) worker = null
+            finishWorker(failure)
+        }
+    }
 
-            val shouldRestart = Prefs.getTaskShouldRun(applicationContext) && ownsGlobalState
-            RuntimeLog.record(
-                applicationContext,
-                "worker finished; failure=${failure != null}; ownsState=$ownsGlobalState; restart=$shouldRestart",
-            )
-            if (shouldRestart) {
+    @Synchronized
+    private fun finishWorker(failure: Throwable?) {
+        // A destroyed service/old worker must never reset a new worker's state.
+        val ownsGlobalState = instance === this && worker === Thread.currentThread()
+        if (ownsGlobalState) {
+            running = false
+            statusDeadline = 0
+        }
+        if (worker === Thread.currentThread()) worker = null
+
+        val restartDelay = WorkerRestartPolicy.delayMs(
+            Prefs.getTaskShouldRun(applicationContext), ownsGlobalState, startQueuedAfterStop,
+        )
+        val queuedRestart = startQueuedAfterStop && restartDelay == 0L
+        startQueuedAfterStop = false
+        RuntimeLog.record(
+            applicationContext,
+            "worker finished; failure=${failure != null}; ownsState=$ownsGlobalState; restart=${restartDelay != null}",
+        )
+        if (restartDelay != null) {
+            if (queuedRestart) {
+                setNextStep(FloatingStatusFormatter.STARTING)
+                RuntimeLog.record(applicationContext, "worker stopped; executing queued start")
+            } else {
                 val reason = failure?.message?.takeIf(String::isNotBlank)
                     ?.let { "任务异常：${it.take(36)}" }
                     ?: "任务线程意外退出"
@@ -2620,24 +2650,23 @@ class SoulBotService : AccessibilityService() {
                     "worker ended unexpectedly; scheduling restart; hadFailure=${failure != null}",
                 )
                 setNextStep("$reason，自动恢复", 3000)
-                restartHandler.postDelayed({
-                    if (instance === this &&
-                        Prefs.getTaskShouldRun(applicationContext) &&
-                        !running
-                    ) {
-                        RuntimeLog.record(applicationContext, "worker automatic restart executing")
-                        start()
-                    } else {
-                        RuntimeLog.record(applicationContext, "worker automatic restart cancelled")
-                    }
-                }, 3000)
-            } else if (ownsGlobalState &&
-                statusText != "未配置 API Key" &&
-                statusText != "模型配置不完整" &&
-                statusText != "用户手动停止"
-            ) {
-                statusText = Prefs.getLastStopReason(applicationContext)
             }
+            restartHandler.postDelayed({
+                if (instance === this &&
+                    Prefs.getTaskShouldRun(applicationContext) && !running
+                ) {
+                    RuntimeLog.record(applicationContext, "worker automatic restart executing")
+                    start()
+                } else {
+                    RuntimeLog.record(applicationContext, "worker automatic restart cancelled")
+                }
+            }, restartDelay)
+        } else if (ownsGlobalState &&
+            statusText != "未配置 API Key" &&
+            statusText != "模型配置不完整" &&
+            statusText != "用户手动停止"
+        ) {
+            statusText = Prefs.getLastStopReason(applicationContext)
         }
     }
 

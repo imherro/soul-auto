@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
@@ -53,6 +54,8 @@ class FloatingButtonService : Service() {
     private var dragLayoutErrorReported = false
     private var dockSide = DockSide.RIGHT
     private var lastRenderedRunning: Boolean? = null
+    private var lastRenderedStarting: Boolean? = null
+    private val clickGate = FloatingClickGate()
     private var repositionPending = false
     private val handler = Handler(Looper.getMainLooper())
     private val autoCollapseRunnable = Runnable {
@@ -589,7 +592,11 @@ class FloatingButtonService : Service() {
             updateStatusPanel()
             return
         }
-        if (SoulBotService.running) {
+        if (!clickGate.accept(SystemClock.elapsedRealtime())) {
+            RuntimeLog.record(applicationContext, "floating duplicate click ignored")
+            return
+        }
+        if (SoulBotService.running || SoulBotService.statusText == FloatingStatusFormatter.STARTING) {
             service.stop()
         } else {
             service.start()
@@ -601,6 +608,7 @@ class FloatingButtonService : Service() {
         val serviceAvailable = SoulBotService.instance != null
         val running = SoulBotService.running
         val rawStatus = SoulBotService.statusText
+        val starting = !running && rawStatus == FloatingStatusFormatter.STARTING
         val deadline = SoulBotService.statusDeadline
         val now = System.currentTimeMillis()
 
@@ -618,23 +626,24 @@ class FloatingButtonService : Service() {
         collapsedView?.contentDescription =
             "${FloatingStatusFormatter.title(running, serviceAvailable, rawStatus)}，点击展开悬浮窗"
 
-        if (lastRenderedRunning != running) {
+        if (lastRenderedRunning != running || lastRenderedStarting != starting) {
             actionTv?.apply {
-                text = if (running) "停止" else "启动"
-                contentDescription = if (running) "停止自动助手" else "启动自动助手"
+                text = if (running) "停止" else if (starting) "取消" else "启动"
+                contentDescription = if (running) "停止自动助手" else if (starting) "取消启动" else "启动自动助手"
                 background = roundedRipple(
-                    if (running) Color.parseColor("#B4232D") else Color.parseColor("#6D28D9"),
+                    if (running || starting) Color.parseColor("#B4232D") else Color.parseColor("#6D28D9"),
                     24,
                 )
                 setCompoundDrawablesRelativeWithIntrinsicBounds(
-                    ActionIconDrawable(running, dp(18)),
+                    ActionIconDrawable(running || starting, dp(18)),
                     null,
                     null,
                     null,
                 )
             }
-            collapsedActionIcon?.setImageDrawable(ActionIconDrawable(running, dp(18)))
+            collapsedActionIcon?.setImageDrawable(ActionIconDrawable(running || starting, dp(18)))
             lastRenderedRunning = running
+            lastRenderedStarting = starting
         }
     }
 
