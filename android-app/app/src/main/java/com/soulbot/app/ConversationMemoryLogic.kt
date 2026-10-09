@@ -17,6 +17,10 @@ object ConversationMemoryLogic {
         if (visibleThread.isEmpty()) return emptyList()
         val existing = existingTail.map(::comparable)
         val visible = visibleThread.map(::comparable)
+        // A re-observed or older viewport already contained in history is not new.
+        if (visible.size <= existing.size && existing.windowed(visible.size).any { it == visible }) {
+            return emptyList()
+        }
         val maximum = minOf(existing.size, visible.size)
         var overlap = 0
         for (size in maximum downTo 1) {

@@ -87,4 +87,11 @@ class ConversationReplyContextTest {
         assertTrue(ConversationReplyContext.asksQuestion("这家店有什么好吃的"))
         assertTrue(ConversationReplyContext.asksQuestion("现在下班了吗"))
     }
+
+    @Test
+    fun acknowledgementCanReferToATopicMoreThanTwentyMessagesBack() {
+        val thread = listOf("in" to "周六准备去杭州看展") + (1..30).map { "in" to "嗯" }
+        val analysis = ConversationReplyContext.analyze(thread, listOf("嗯"))
+        assertTrue(analysis.supportingTranscript.contains("杭州看展"))
+    }
 }

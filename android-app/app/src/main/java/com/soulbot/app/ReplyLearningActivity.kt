@@ -13,6 +13,7 @@ import com.google.android.material.textfield.TextInputLayout
 
 class ReplyLearningActivity : BaseSettingsActivity() {
     private lateinit var learningDb: ChatLearningDatabase
+    private lateinit var memoryDb: ConversationMemoryDatabase
     private lateinit var tvStats: TextView
     private lateinit var tvStyleProfile: TextView
 
@@ -21,6 +22,7 @@ class ReplyLearningActivity : BaseSettingsActivity() {
         setContentView(R.layout.activity_reply_learning)
         setupToolbar("回复与学习")
         learningDb = ChatLearningDatabase(applicationContext)
+        memoryDb = ConversationMemoryDatabase(applicationContext)
         tvStats = findViewById(R.id.tvLearningStats)
         tvStyleProfile = findViewById(R.id.tvStyleProfile)
         val styleSwitch = findViewById<MaterialSwitch>(R.id.switchStyleLearning)
@@ -59,6 +61,7 @@ class ReplyLearningActivity : BaseSettingsActivity() {
 
     override fun onDestroy() {
         learningDb.close()
+        memoryDb.close()
         super.onDestroy()
     }
 
@@ -69,7 +72,8 @@ class ReplyLearningActivity : BaseSettingsActivity() {
         val feedback = learningDb.feedbackSummary()
         tvStats.text =
             "风格学习 $style · ${learningDb.styleSampleCount()} 条样本\n" +
-                "记忆引用 $memory · ${learningDb.contactMemoryCount()} 条旧版摘要\n" +
+                "记忆引用 $memory · ${memoryDb.summaryCount()} 位联系人滚动摘要\n" +
+                "近期上下文最多 60 条 · ${memoryDb.messageCount()} 条已存聊天记录\n" +
                 "反馈：像我 ${feedback.positive} · 不像我 ${feedback.negative} · " +
                 "质量拒绝 ${feedback.qualityRejected}"
         tvStyleProfile.text = if (profile.sampleCount == 0) {

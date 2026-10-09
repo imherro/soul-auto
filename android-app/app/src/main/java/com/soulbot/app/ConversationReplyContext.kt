@@ -84,7 +84,7 @@ object ConversationReplyContext {
         thread: List<Pair<String, String>>,
         focusIncoming: List<String> = emptyList(),
     ): ReplyContextAnalysis {
-        val recent = thread.takeLast(20)
+        val recent = thread.takeLast(ConversationContextPolicy.RECENT_LIMIT)
         val focus = focusIncoming.filter(String::isNotBlank).ifEmpty {
             recent.filter { it.first == "in" }.takeLast(1).map { it.second }
         }

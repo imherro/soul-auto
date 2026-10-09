@@ -18,8 +18,8 @@ data class ConversationMemoryImportResult(
     val invalid: Int,
 )
 
-class ConversationMemoryDatabase(context: Context) :
-    SQLiteOpenHelper(context, "conversation_memory.db", null, 1) {
+class ConversationMemoryDatabase(context: Context, databaseName: String = "conversation_memory.db") :
+    SQLiteOpenHelper(context, databaseName, null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -36,9 +36,21 @@ class ConversationMemoryDatabase(context: Context) :
             "CREATE INDEX idx_conversation_contact_time " +
                 "ON conversation_messages(contact, observed_at, id)",
         )
+        createSummaryTable(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createSummaryTable(db)
+    }
+
+    private fun createSummaryTable(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS conversation_summaries (" +
+                "contact TEXT PRIMARY KEY, content TEXT NOT NULL, " +
+                "through_message_id INTEGER NOT NULL, updated_at INTEGER NOT NULL, " +
+                "last_attempt_at INTEGER NOT NULL)",
+        )
+    }
 
     fun hasHistory(contact: String): Boolean {
         val clean = cleanContact(contact) ?: return false
@@ -177,6 +189,89 @@ class ConversationMemoryDatabase(context: Context) :
 
     fun messageCount(): Int = scalarCount("conversation_messages")
 
+    fun recentContext(contact: String, visible: List<Pair<String, String>>): List<Pair<String, String>> {
+        val clean = cleanContact(contact) ?: return ConversationContextPolicy.recentContext(emptyList(), visible)
+        val stored = recentEntries(clean, ConversationContextPolicy.RECENT_LIMIT).map { it.role to it.content }
+        return ConversationContextPolicy.recentContext(stored, visible)
+    }
+
+    fun summaryState(contact: String): ConversationSummaryState {
+        val clean = cleanContact(contact) ?: return ConversationSummaryState()
+        readableDatabase.rawQuery(
+            "SELECT content, through_message_id, updated_at, last_attempt_at FROM conversation_summaries WHERE contact=?",
+            arrayOf(clean),
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) ConversationSummaryState(
+                cursor.getString(0), cursor.getLong(1), cursor.getLong(2), cursor.getLong(3),
+            ) else ConversationSummaryState()
+        }
+    }
+
+    fun summaryUpdate(contact: String, now: Long): Pair<ConversationSummaryState, ConversationSummaryBatch>? {
+        val clean = cleanContact(contact) ?: return null
+        val state = summaryState(clean)
+        val pending = mutableListOf<SummaryMessage>()
+        readableDatabase.rawQuery(
+            "SELECT id, role, content, observed_at FROM conversation_messages WHERE contact=? AND id>? " +
+                "ORDER BY id LIMIT ?",
+            arrayOf(clean, state.throughMessageId.toString(), ConversationSummaryPolicy.MAX_BATCH_MESSAGES.toString()),
+        ).use { cursor ->
+            while (cursor.moveToNext()) pending += SummaryMessage(
+                cursor.getLong(0), cursor.getString(1), cursor.getString(2), cursor.getLong(3),
+            )
+        }
+        return ConversationSummaryPolicy.refreshBatch(state, pending, now)?.let { state to it }
+    }
+
+    fun markSummaryAttempt(contact: String, state: ConversationSummaryState, now: Long): Boolean {
+        val clean = cleanContact(contact) ?: return false
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.insertWithOnConflict("conversation_summaries", null, ContentValues().apply {
+                put("contact", clean)
+                put("content", "")
+                put("through_message_id", 0)
+                put("updated_at", 0)
+                put("last_attempt_at", 0)
+            }, SQLiteDatabase.CONFLICT_IGNORE)
+            val changed = db.update("conversation_summaries", ContentValues().apply {
+                put("last_attempt_at", now)
+            }, "contact=? AND through_message_id=? AND updated_at=? AND last_attempt_at=?", arrayOf(
+                clean, state.throughMessageId.toString(), state.updatedAt.toString(), state.lastAttemptAt.toString(),
+            ))
+            db.setTransactionSuccessful()
+            return changed == 1
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun saveSummary(
+        contact: String,
+        text: String,
+        state: ConversationSummaryState,
+        batch: ConversationSummaryBatch,
+        attemptAt: Long,
+    ): Boolean {
+        val clean = cleanContact(contact) ?: return false
+        val valid = ConversationSummaryPolicy.validatedSummary(text) ?: return false
+        // A clear or another update during the network call must not resurrect stale memory.
+        return writableDatabase.update("conversation_summaries", ContentValues().apply {
+            put("content", valid)
+            put("through_message_id", batch.throughMessageId)
+            put("updated_at", maxOf(System.currentTimeMillis(), attemptAt))
+        }, "contact=? AND through_message_id=? AND last_attempt_at=?", arrayOf(
+            clean, state.throughMessageId.toString(), attemptAt.toString(),
+        )) == 1
+    }
+
+    fun summaryCount(): Int {
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM conversation_summaries WHERE content<>''", null).use {
+            return if (it.moveToFirst()) it.getInt(0) else 0
+        }
+    }
+
     fun contactCount(): Int {
         readableDatabase.rawQuery(
             "SELECT COUNT(DISTINCT contact) FROM conversation_messages",
@@ -185,7 +280,15 @@ class ConversationMemoryDatabase(context: Context) :
     }
 
     fun clearAll() {
-        writableDatabase.delete("conversation_messages", null, null)
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("conversation_summaries", null, null)
+            db.delete("conversation_messages", null, null)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun writeExport(writer: Writer) {

@@ -21,8 +21,10 @@ object ModelRouter {
         messages: List<Pair<String, String>>,
         onProgress: (String, Long) -> Unit = { _, _ -> },
         waitBeforeNext: (Long) -> Unit = { Thread.sleep(it) },
+        generationBudgetMs: Long = MAX_GENERATION_WAIT_MS,
     ): String? {
         val startedAt = System.currentTimeMillis()
+        val budget = generationBudgetMs.coerceIn(MIN_CALL_BUDGET_MS, MAX_GENERATION_WAIT_MS)
         val endpoints = ModelEndpointPrefs.getEndpoints(context)
         val health = ModelEndpointPrefs.getHealth(context)
         val candidates = ModelFailoverPolicy.orderedCandidates(endpoints, health, startedAt)
@@ -45,14 +47,14 @@ object ModelRouter {
         val inputChars = messages.sumOf { it.second.length }
         RuntimeLog.record(
             context,
-            "model route started; candidates=${candidates.size}; messages=${messages.size}; inputChars=$inputChars; budgetMs=$MAX_GENERATION_WAIT_MS",
+            "model route started; candidates=${candidates.size}; messages=${messages.size}; inputChars=$inputChars; budgetMs=$budget",
         )
 
         for ((candidateIndex, endpoint) in candidates.withIndex()) {
             val elapsed = System.currentTimeMillis() - startedAt
-            val remaining = MAX_GENERATION_WAIT_MS - elapsed
+            val remaining = budget - elapsed
             if (remaining < MIN_CALL_BUDGET_MS) {
-                lastError = "本轮模型调用已超过 75 秒"
+                lastError = "本轮模型调用已超过 ${budget / 1000} 秒预算"
                 RuntimeLog.record(
                     context,
                     "model route budget exhausted; elapsedMs=$elapsed; remainingMs=$remaining",
