@@ -14,7 +14,7 @@
         android:name=".SoulBotApplication"
         android:allowBackup="true"
         android:icon="@android:drawable/sym_def_app_icon"
-        android:label="@string/app_name"
+        android:label="${soulbotAppLabel}"
         android:theme="@style/Theme.SoulBot">
 
         <activity

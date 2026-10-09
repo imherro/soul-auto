@@ -8,11 +8,15 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId "com.soulbot.app"
+        // Optional parallel-install build when the original APK's signing key
+        // is unavailable. The standard build keeps the original package ID.
+        applicationId project.findProperty('soulbotApplicationId') ?: "com.soulbot.app"
+        manifestPlaceholders = [soulbotAppLabel: project.findProperty('soulbotApplicationId')
+            ? "SoulBot 未读修复版" : "@string/app_name"]
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName "1.1"
+        versionCode 3
+        versionName "1.1.1"
     }
 
     buildTypes {

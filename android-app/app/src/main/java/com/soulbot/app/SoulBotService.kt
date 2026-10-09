@@ -1272,49 +1272,82 @@ class SoulBotService : AccessibilityService() {
 
     // ===== 扫未读（仅会话列表） =====
 
+    private data class ConversationListSnapshot(
+        val rows: List<ResolvedConversationRow>,
+        val nodes: Map<Int, AccessibilityNodeInfo>,
+        val visibleNames: Int,
+        val visibleBadges: Int,
+    )
+
+    private fun conversationListRows(): ConversationListSnapshot {
+        val empty = ConversationListSnapshot(emptyList(), emptyMap(), 0, 0)
+        if (!isOnList()) return empty
+        val currentRoot = root() ?: return empty
+        val pending = ArrayDeque<Pair<AccessibilityNodeInfo, Int?>>()
+        pending.add(currentRoot to null)
+        val nodes = mutableMapOf<Int, AccessibilityNodeInfo>()
+        val metadata = mutableListOf<ConversationUiNode>()
+        while (pending.isNotEmpty() && metadata.size < 5000) {
+            val (node, parentId) = pending.removeLast()
+            val id = metadata.size
+            val role = when (runCatching { node.viewIdResourceName }.getOrNull()) {
+                ID_CONV_LIST -> ConversationNodeRole.LIST
+                ID_CONV_ITEM -> ConversationNodeRole.LEGACY_ROW
+                ID_CONV_NAME -> ConversationNodeRole.NAME
+                ID_CONV_TIME -> ConversationNodeRole.TIME
+                ID_UNREAD_BADGE -> ConversationNodeRole.UNREAD
+                else -> ConversationNodeRole.OTHER
+            }
+            nodes[id] = node
+            metadata += ConversationUiNode(
+                id = id,
+                parentId = parentId,
+                bounds = rect(node).toUiRegion(),
+                role = role,
+                text = if (role in setOf(ConversationNodeRole.NAME, ConversationNodeRole.TIME, ConversationNodeRole.UNREAD)) {
+                    textOf(node)
+                } else "",
+                visible = isVisibleOnScreen(node),
+                clickable = runCatching { node.isClickable }.getOrDefault(false),
+            )
+            for (childIndex in 0 until runCatching { node.childCount }.getOrDefault(0)) {
+                runCatching { node.getChild(childIndex) }.getOrNull()?.let {
+                    pending.add(it to id)
+                }
+            }
+        }
+        // Never infer uniqueness from a partial tree: an omitted contact could
+        // turn a shared container into a seemingly safe single-contact row.
+        if (pending.isNotEmpty()) {
+            RuntimeLog.record(applicationContext, "conversation list snapshot rejected; reason=node_limit")
+            return empty
+        }
+        return ConversationListSnapshot(
+            rows = ConversationRowPolicy.resolve(metadata, activeWindowRegion()),
+            nodes = nodes,
+            visibleNames = metadata.count { it.visible && it.role == ConversationNodeRole.NAME },
+            visibleBadges = metadata.count { it.visible && it.role == ConversationNodeRole.UNREAD },
+        )
+    }
+
     private fun scanUnread(): List<UnreadConversationCandidate> {
         if (!isOnList()) return emptyList()
-        val items = findByIds(ID_CONV_ITEM)
-            .filter(::isVisibleOnScreen)
-            .sortedBy { rect(it).top }
-        val names = findByIds(ID_CONV_NAME).filter(::isVisibleOnScreen)
-        val times = findByIds(ID_CONV_TIME).filter(::isVisibleOnScreen)
-        // Soul keeps recycled/hidden unread badges in the accessibility tree. Using
-        // them made an already-read row reopen forever and wait for content that
-        // could never be "unread" again.
-        val badges = findByIds(ID_UNREAD_BADGE).filter(::isVisibleOnScreen)
-        val result = mutableListOf<UnreadConversationCandidate>()
-        for ((displayOrder, item) in items.withIndex()) {
-            val ib = rect(item)
-            val hasBadge = badges.any { contains(ib, rect(it)) }
-            if (!hasBadge) continue
-            var name = ""
-            for (n in names) { if (contains(ib, rect(n))) { name = textOf(n); break } }
-            var time = ""
-            for (tm in times) { if (contains(ib, rect(tm))) { time = textOf(tm); break } }
-            if (name.isNotBlank()) {
-                result += UnreadConversationCandidate(name, time, displayOrder)
-            }
+        val snapshot = conversationListRows()
+        val result = snapshot.rows.mapIndexedNotNull { displayOrder, row ->
+            if (row.unread) UnreadConversationCandidate(row.name, row.timeText, displayOrder) else null
         }
         val ordered = UnreadConversationPolicy.oldestFirst(result)
         RuntimeLog.record(
             applicationContext,
-            "unread scan completed; visibleRows=${items.size}; visibleBadges=${badges.size}; candidates=${ordered.size}; selectedContact=${ordered.firstOrNull()?.let { DiagnosticIdentity.contactId(applicationContext, it.name) } ?: "none"}",
+            "unread scan completed; visibleRows=${snapshot.rows.size}; visibleNames=${snapshot.visibleNames}; fallbackRows=${snapshot.rows.count { !it.usesLegacyId }}; visibleBadges=${snapshot.visibleBadges}; candidates=${ordered.size}; selectedContact=${ordered.firstOrNull()?.let { DiagnosticIdentity.contactId(applicationContext, it.name) } ?: "none"}",
         )
         return ordered
     }
 
     private fun findConversation(name: String): AccessibilityNodeInfo? {
-        if (!isOnList()) return null
-        val items = findByIds(ID_CONV_ITEM).filter(::isVisibleOnScreen)
-        val names = findByIds(ID_CONV_NAME).filter(::isVisibleOnScreen)
-        for (item in items) {
-            val ib = rect(item)
-            for (n in names) {
-                if (contains(ib, rect(n)) && textOf(n) == name) return item
-            }
-        }
-        return null
+        val snapshot = conversationListRows()
+        val row = snapshot.rows.singleOrNull { it.name == name.trim() } ?: return null
+        return snapshot.nodes[row.clickNodeId]
     }
 
     // ===== LLM =====
@@ -2085,7 +2118,11 @@ class SoulBotService : AccessibilityService() {
     private fun hasGreeting(): Boolean = findVisibleById(ID_GREETING_TITLE) != null
 
     /** Hidden tab-bar nodes remain in Soul's accessibility tree; only a visible dot is unread. */
-    private fun hasUnreadRedDot(): Boolean = findVisibleById(ID_MSG_RED_DOT) != null
+    private fun hasUnreadRedDot(): Boolean =
+        findVisibleById(ID_MSG_RED_DOT) != null ||
+            (isOnList() && findByIds(ID_UNREAD_BADGE).any {
+                isVisibleOnScreen(it) && textOf(it).toIntOrNull() != 0
+            })
 
     private fun openGreetingList(): Boolean {
         setNextStep("打开新招呼列表")
@@ -2731,7 +2768,7 @@ class SoulBotService : AccessibilityService() {
                         if (hasGreeting() && System.currentTimeMillis() >= greetingRecheckAt) {
                             setNextStep("处理新招呼")
                             openGreetingList()
-                        } else if (hasUnreadRedDot()) {
+                        } else {
                             val unread = scanUnread()
                             if (unread.isNotEmpty()) {
                                 unreadTopSearchComplete = false
@@ -2751,7 +2788,7 @@ class SoulBotService : AccessibilityService() {
                                     },
                                 )
                                 replyTo(name, seen)
-                            } else if (!unreadTopSearchComplete) {
+                            } else if (hasUnreadRedDot() && !unreadTopSearchComplete) {
                                 setNextStep("回到会话顶部")
                                 scrollConversationToTop()
                                 unreadTopSearchComplete = true
@@ -2761,12 +2798,9 @@ class SoulBotService : AccessibilityService() {
                                 // The tab red dot can remain stale after all rows are read.
                                 // Keep the acknowledgement while the same dot remains visible,
                                 // otherwise an empty list would pull us back from the work page.
-                                unreadTopSearchComplete = true
+                                unreadTopSearchComplete = hasUnreadRedDot()
                                 handleIdleWork()
                             }
-                        } else {
-                            unreadTopSearchComplete = false
-                            handleIdleWork()
                         }
                     }
                     Screen.GREETING_LIST -> {
